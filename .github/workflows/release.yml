@@ -1,0 +1,31 @@
+name: Reassign floating major tag
+
+# When a SemVer tag like v1.2.3 is pushed, force-update the floating
+# major tag (v1) to point at the same commit. Standard pattern for
+# JS actions so consumers can pin `uses: AccessLint/audit@v1`.
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  reassign:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Reassign floating major
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"   # e.g. v1.2.3
+          MAJOR="${TAG%%.*}"          # e.g. v1
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f "$MAJOR" "$TAG"
+          git push origin "$MAJOR" --force
+          echo "Reassigned $MAJOR -> $TAG"

@@ -1,0 +1,27 @@
+{
+  "name": "@accesslint/audit-action",
+  "version": "0.1.0",
+  "private": true,
+  "description": "GitHub Action that audits a URL against WCAG 2.2 and emits JSON + Markdown reports.",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/main.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/index.js --external:playwright --external:@accesslint/core --sourcemap --legal-comments=external --banner:js=\"import { createRequire } from 'module'; const require = createRequire(import.meta.url);\"",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint:bundle": "git diff --exit-code dist/"
+  },
+  "dependencies": {
+    "@accesslint/core": "^0.11.1",
+    "@actions/core": "^3.0.1",
+    "playwright": "^1.50.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

@@ -1,0 +1,79 @@
+name: AccessLint Audit
+description: Run a WCAG 2.2 accessibility audit against a live URL and emit JSON + Markdown reports.
+author: AccessLint
+branding:
+  icon: check-circle
+  color: blue
+
+inputs:
+  url:
+    description: "URL to audit (dev, preview, or prod)."
+    required: true
+  wcag-level:
+    description: "Conformance level: A, AA (default), or AAA."
+    default: "AA"
+  min-impact:
+    description: "Minimum impact level to include in the report: critical, serious (default), moderate, minor."
+    default: "serious"
+  wait-for:
+    description: "What to wait for after navigation: 'load', 'domcontentloaded', 'networkidle' (default), or a CSS selector."
+    default: "networkidle"
+  auth-headers:
+    description: "JSON object of HTTP headers to send with every request (e.g. for protected previews)."
+    default: ""
+  output-dir:
+    description: "Where to write report files. Defaults to $GITHUB_WORKSPACE."
+    default: ""
+  install-browser:
+    description: "Run 'playwright install --only-shell chromium' before auditing. Set 'false' if your workflow already does this."
+    default: "true"
+
+outputs:
+  violation-count:
+    description: "Total violations after the min-impact filter."
+    value: ${{ steps.audit.outputs.violation-count }}
+  critical-count:
+    description: "Number of critical-impact violations."
+    value: ${{ steps.audit.outputs.critical-count }}
+  serious-count:
+    description: "Number of serious-impact violations."
+    value: ${{ steps.audit.outputs.serious-count }}
+  failed:
+    description: "'true' when violation-count is greater than zero, else 'false'."
+    value: ${{ steps.audit.outputs.failed }}
+  report-json-path:
+    description: "Path to the JSON report file."
+    value: ${{ steps.audit.outputs.report-json-path }}
+  report-markdown-path:
+    description: "Path to the Markdown report file."
+    value: ${{ steps.audit.outputs.report-markdown-path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install action dependencies
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: npm ci --omit=dev --no-audit --no-fund --silent
+
+    - name: Install chromium-headless-shell
+      if: ${{ inputs.install-browser == 'true' }}
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: npx --yes playwright install --only-shell chromium
+
+    - name: Run audit
+      id: audit
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      env:
+        INPUT_URL: ${{ inputs.url }}
+        INPUT_WCAG-LEVEL: ${{ inputs.wcag-level }}
+        INPUT_MIN-IMPACT: ${{ inputs.min-impact }}
+        INPUT_WAIT-FOR: ${{ inputs.wait-for }}
+        INPUT_AUTH-HEADERS: ${{ inputs.auth-headers }}
+        INPUT_OUTPUT-DIR: ${{ inputs.output-dir }}
+        # Browser install is handled by the composite step above; tell the
+        # main entry not to attempt it again.
+        INPUT_INSTALL-BROWSER: "false"
+      run: node dist/index.js
