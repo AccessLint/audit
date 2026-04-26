@@ -19,7 +19,11 @@ inputs:
     description: "What to wait for after navigation. Examples: load, domcontentloaded, networkidle (default), or a CSS selector like '#app-ready' / '[data-testid=\"shell-mounted\"]'."
     default: "networkidle"
   auth-headers:
-    description: "JSON object of HTTP headers for every request. Example: '{\"Authorization\":\"Bearer ${{ secrets.PREVIEW_TOKEN }}\",\"X-Vercel-Protection-Bypass\":\"abc123\"}'."
+    # Avoid literal ${{ ... }} in this description — composite-action descriptions
+    # are template-evaluated when the action loads, and a fake expression breaks
+    # every consumer with 'Unrecognized named-value'. The README has the full
+    # example with secrets interpolation; here we describe the shape only.
+    description: 'JSON object of HTTP headers for every request. Example shape: {"Authorization":"Bearer <token>","X-Vercel-Protection-Bypass":"<token>"}.'
     default: ""
   output-dir:
     description: "Where to write accesslint-report.{json,md}. Defaults to $GITHUB_WORKSPACE so downstream actions can pick the files up directly."
