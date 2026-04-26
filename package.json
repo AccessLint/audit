@@ -5,7 +5,7 @@
   "description": "GitHub Action that audits a URL against WCAG 2.2 and emits JSON + Markdown reports.",
   "type": "module",
   "scripts": {
-    "build": "esbuild src/main.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/index.js --external:playwright --external:@accesslint/core --sourcemap --legal-comments=external --banner:js=\"import { createRequire } from 'module'; const require = createRequire(import.meta.url);\"",
+    "build": "esbuild src/main.ts --bundle --platform=node --target=node24 --format=esm --outfile=dist/index.js --external:playwright --external:@accesslint/core --sourcemap --legal-comments=external --banner:js=\"import { createRequire } from 'module'; const require = createRequire(import.meta.url);\"",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "lint:bundle": "git diff --exit-code dist/"
