@@ -7,25 +7,25 @@ branding:
 
 inputs:
   url:
-    description: "URL to audit (dev, preview, or prod)."
+    description: "URL to audit. Examples: https://example.com, https://pr-123-myapp.preview.dev, http://localhost:3000."
     required: true
   wcag-level:
-    description: "Conformance level: A, AA (default), or AAA."
+    description: "Conformance level. One of: A, AA, AAA. Default AA."
     default: "AA"
   min-impact:
-    description: "Minimum impact level to include in the report: critical, serious (default), moderate, minor."
+    description: "Minimum impact level to include in the report. One of: critical, serious, moderate, minor. Default serious — drops moderate and minor from the output."
     default: "serious"
   wait-for:
-    description: "What to wait for after navigation: 'load', 'domcontentloaded', 'networkidle' (default), or a CSS selector."
+    description: "What to wait for after navigation. Examples: load, domcontentloaded, networkidle (default), or a CSS selector like '#app-ready' / '[data-testid=\"shell-mounted\"]'."
     default: "networkidle"
   auth-headers:
-    description: "JSON object of HTTP headers to send with every request (e.g. for protected previews)."
+    description: "JSON object of HTTP headers for every request. Example: '{\"Authorization\":\"Bearer ${{ secrets.PREVIEW_TOKEN }}\",\"X-Vercel-Protection-Bypass\":\"abc123\"}'."
     default: ""
   output-dir:
-    description: "Where to write report files. Defaults to $GITHUB_WORKSPACE."
+    description: "Where to write accesslint-report.{json,md}. Defaults to $GITHUB_WORKSPACE so downstream actions can pick the files up directly."
     default: ""
   install-browser:
-    description: "Run 'playwright install --only-shell chromium' before auditing. Set 'false' if your workflow already does this."
+    description: "Run 'playwright install --only-shell chromium' before auditing. Set 'false' if you've already cached and restored ~/.cache/ms-playwright in an earlier step. Default true."
     default: "true"
 
 outputs:

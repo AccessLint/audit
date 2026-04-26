@@ -19213,8 +19213,27 @@ async function runAudit(inputs) {
       extraHTTPHeaders: Object.keys(inputs.authHeaders).length > 0 ? inputs.authHeaders : void 0
     });
     const page = await context.newPage();
-    await page.goto(inputs.url, { waitUntil: "load", timeout: 6e4 });
-    await applyWait(page, inputs.waitFor);
+    try {
+      await page.goto(inputs.url, { waitUntil: "load", timeout: 6e4 });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `Failed to load ${inputs.url}: ${reason}
+Common fixes:
+  \u2022 Protected preview? Pass 'auth-headers' with the right Authorization or bypass token.
+  \u2022 Slow startup? Increase 'wait-for' or wait on a specific selector.
+  \u2022 Local dev server in CI? Make sure it's started in an earlier step and listening on the URL.`
+      );
+    }
+    try {
+      await applyWait(page, inputs.waitFor);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `wait-for timed out: ${reason}
+The page loaded but the wait condition (${inputs.waitFor}) wasn't met within the budget. If your app needs longer, switch 'wait-for' to a specific selector that signals readiness (e.g. '#app-ready', '[data-testid="shell-mounted"]').`
+      );
+    }
     await page.addScriptTag({ content: iife });
     const opts = { includeAAA: inputs.wcagLevel === "AAA" };
     const result = await page.evaluate(async (opts2) => {

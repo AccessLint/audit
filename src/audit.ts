@@ -46,8 +46,33 @@ export async function runAudit(inputs: ActionInputs): Promise<RawAuditResult> {
     });
     const page = await context.newPage();
 
-    await page.goto(inputs.url, { waitUntil: "load", timeout: 60_000 });
-    await applyWait(page, inputs.waitFor);
+    try {
+      await page.goto(inputs.url, { waitUntil: "load", timeout: 60_000 });
+    } catch (err) {
+      // Reframe the Playwright stack as a user-facing message that names the
+      // most likely fixes — auth-headers for protected previews, wait-for
+      // budget for slow loads, network reachability for dev servers.
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `Failed to load ${inputs.url}: ${reason}\n` +
+          `Common fixes:\n` +
+          `  • Protected preview? Pass 'auth-headers' with the right Authorization or bypass token.\n` +
+          `  • Slow startup? Increase 'wait-for' or wait on a specific selector.\n` +
+          `  • Local dev server in CI? Make sure it's started in an earlier step and listening on the URL.`,
+      );
+    }
+
+    try {
+      await applyWait(page, inputs.waitFor);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `wait-for timed out: ${reason}\n` +
+          `The page loaded but the wait condition (${inputs.waitFor}) wasn't met within the budget. ` +
+          `If your app needs longer, switch 'wait-for' to a specific selector that signals readiness ` +
+          `(e.g. '#app-ready', '[data-testid="shell-mounted"]').`,
+      );
+    }
 
     await page.addScriptTag({ content: iife });
 
