@@ -94,18 +94,31 @@ function locationFor(v: LocatedViolation, workspace: string): SarifLocation {
       return { physicalLocation: physical };
     }
   }
-  // Fallback: synthesize a physicalLocation pointing at the page URL.
-  // SARIF allows http(s) URIs in artifactLocation, and GitHub Code Scanning
-  // *requires* every result to carry a physicalLocation (logicalLocations
-  // alone are rejected). We add a logicalLocation alongside so the URL is
-  // also surfaced semantically.
+  // Fallback: synthesize a repo-relative physicalLocation derived from the
+  // URL. Code Scanning *requires* a physicalLocation on every result AND
+  // rejects `https:` URIs (the URI must match the checkout's `file:`
+  // scheme). We project the URL into a synthetic path under %SRCROOT%
+  // (e.g. `audit/example.com/dashboard`) so violations from the same URL
+  // group together in the Security tab. The path doesn't need to exist
+  // in the repo — Code Scanning accepts non-existent paths and just
+  // skips inline annotations for them.
   return {
     physicalLocation: {
-      artifactLocation: { uri: v.url },
+      artifactLocation: { uri: urlToSyntheticPath(v.url), uriBaseId: "%SRCROOT%" },
       region: { startLine: 1 },
     },
     logicalLocations: [{ name: v.url, kind: "url" }],
   };
+}
+
+function urlToSyntheticPath(url: string): string {
+  try {
+    const u = new URL(url);
+    const path = u.pathname === "/" ? "" : u.pathname;
+    return `audit/${u.host}${path}`;
+  } catch {
+    return `audit/${url.replace(/[^a-zA-Z0-9._/-]/g, "_")}`;
+  }
 }
 
 export function buildSarif(run: AuditRun, workspace: string): SarifLog {

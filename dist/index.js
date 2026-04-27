@@ -19613,11 +19613,20 @@ function locationFor(v, workspace) {
   }
   return {
     physicalLocation: {
-      artifactLocation: { uri: v.url },
+      artifactLocation: { uri: urlToSyntheticPath(v.url), uriBaseId: "%SRCROOT%" },
       region: { startLine: 1 }
     },
     logicalLocations: [{ name: v.url, kind: "url" }]
   };
+}
+function urlToSyntheticPath(url) {
+  try {
+    const u = new URL(url);
+    const path = u.pathname === "/" ? "" : u.pathname;
+    return `audit/${u.host}${path}`;
+  } catch {
+    return `audit/${url.replace(/[^a-zA-Z0-9._/-]/g, "_")}`;
+  }
 }
 function buildSarif(run2, workspace) {
   const seen = /* @__PURE__ */ new Map();

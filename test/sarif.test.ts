@@ -73,7 +73,7 @@ describe("buildSarif", () => {
     });
   });
 
-  it("synthesizes a physicalLocation pointing at the URL when source is outside workspace", () => {
+  it("synthesizes a repo-relative physicalLocation when source is outside workspace", () => {
     const sarif = buildSarif(
       runFor([
         v({
@@ -83,19 +83,35 @@ describe("buildSarif", () => {
       WORKSPACE,
     );
     const loc = sarif.runs[0]!.results[0]!.locations[0]!;
-    // GitHub Code Scanning requires a physical location on every result.
+    // Code Scanning requires a physicalLocation AND rejects https: URIs;
+    // synthetic path under %SRCROOT% projects URL → repo-relative path.
     expect(loc.physicalLocation).toEqual({
-      artifactLocation: { uri: "https://example.com" },
+      artifactLocation: { uri: "audit/example.com", uriBaseId: "%SRCROOT%" },
       region: { startLine: 1 },
     });
     expect(loc.logicalLocations?.[0]?.name).toBe("https://example.com");
   });
 
-  it("synthesizes a physicalLocation when there's no source at all", () => {
+  it("synthesizes a repo-relative physicalLocation when there's no source at all", () => {
     const sarif = buildSarif(runFor([v()]), WORKSPACE);
     const loc = sarif.runs[0]!.results[0]!.locations[0]!;
-    expect(loc.physicalLocation).toBeDefined();
-    expect(loc.physicalLocation?.artifactLocation.uri).toBe("https://example.com");
+    expect(loc.physicalLocation?.artifactLocation.uri).toBe("audit/example.com");
+    expect(loc.physicalLocation?.artifactLocation.uriBaseId).toBe("%SRCROOT%");
+  });
+
+  it("preserves URL path in synthetic location", () => {
+    const customRaw = (violations: SerializedViolation[]): RawAuditResult => ({
+      url: "https://example.com/dashboard/page",
+      timestamp: 0,
+      ruleCount: 1,
+      violations,
+    });
+    const run = aggregateRun([
+      buildPerUrlReport(customRaw([v()]), "https://example.com/dashboard/page", "minor"),
+    ]);
+    const sarif = buildSarif(run, WORKSPACE);
+    const uri = sarif.runs[0]!.results[0]!.locations[0]!.physicalLocation?.artifactLocation.uri;
+    expect(uri).toBe("audit/example.com/dashboard/page");
   });
 
   it("deduplicates rules across multiple violations", () => {
