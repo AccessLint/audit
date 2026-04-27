@@ -1,8 +1,9 @@
-import { getInput, getBooleanInput } from "@actions/core";
-import type { ActionInputs, Impact, WcagLevel } from "./types.js";
+import { getInput } from "@actions/core";
+import type { ActionInputs, FailLevel, Impact, WcagLevel } from "./types.js";
 
 const IMPACTS: readonly Impact[] = ["critical", "serious", "moderate", "minor"] as const;
 const LEVELS: readonly WcagLevel[] = ["A", "AA", "AAA"] as const;
+const FAIL_LEVELS: readonly FailLevel[] = ["never", "any", ...IMPACTS] as const;
 
 function parseHeaders(raw: string): Record<string, string> {
   const trimmed = raw.trim();
@@ -33,6 +34,14 @@ function parseEnum<T extends string>(name: string, value: string, allowed: reado
   return value as T;
 }
 
+/** Parse comma- or whitespace-separated rule IDs. Empty => []. */
+function parseRuleList(raw: string): string[] {
+  return raw
+    .split(/[\s,]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
 export function readInputs(): ActionInputs {
   const url = getInput("url", { required: true });
   // Sanity check the URL early so we fail fast with a clear message rather
@@ -47,9 +56,10 @@ export function readInputs(): ActionInputs {
     url,
     wcagLevel: parseEnum("wcag-level", getInput("wcag-level") || "AA", LEVELS),
     minImpact: parseEnum("min-impact", getInput("min-impact") || "serious", IMPACTS),
+    failOn: parseEnum("fail-on", getInput("fail-on") || "never", FAIL_LEVELS),
+    rules: parseRuleList(getInput("rules")),
+    rulesExclude: parseRuleList(getInput("rules-exclude")),
     waitFor: getInput("wait-for") || "networkidle",
     authHeaders: parseHeaders(getInput("auth-headers")),
-    outputDir: getInput("output-dir") || process.env.GITHUB_WORKSPACE || process.cwd(),
-    installBrowser: getBooleanInput("install-browser"),
   };
 }

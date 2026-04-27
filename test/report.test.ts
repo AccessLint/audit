@@ -4,6 +4,8 @@ import {
   buildMarkdown,
   filterByImpact,
   countByImpact,
+  shouldFail,
+  lastSelectorSegment,
 } from "../src/report.js";
 import type { ActionInputs, SerializedViolation } from "../src/types.js";
 import type { RawAuditResult } from "../src/audit.js";
@@ -23,10 +25,11 @@ const inputs: ActionInputs = {
   url: "https://example.com",
   wcagLevel: "AA",
   minImpact: "serious",
+  failOn: "never",
+  rules: [],
+  rulesExclude: [],
   waitFor: "networkidle",
   authHeaders: {},
-  outputDir: "/tmp",
-  installBrowser: false,
 };
 
 const raw = (violations: SerializedViolation[]): RawAuditResult => ({
@@ -84,8 +87,50 @@ describe("buildReport", () => {
   });
 });
 
+describe("shouldFail", () => {
+  const r = (counts: Partial<Record<"critical" | "serious" | "moderate" | "minor", number>>) =>
+    buildReport(
+      raw(
+        (Object.entries(counts) as [SerializedViolation["impact"], number][]).flatMap(
+          ([impact, n]) => Array.from({ length: n }, () => v({ impact })),
+        ),
+      ),
+      { ...inputs, minImpact: "minor" },
+    );
+
+  it("never fails when fail-on=never", () => {
+    expect(shouldFail(r({ critical: 5 }), "never")).toBe(false);
+  });
+
+  it("fails on any when there's at least one violation", () => {
+    expect(shouldFail(r({ minor: 1 }), "any")).toBe(true);
+    expect(shouldFail(r({}), "any")).toBe(false);
+  });
+
+  it("fails on serious only when serious or critical present", () => {
+    expect(shouldFail(r({ critical: 1 }), "serious")).toBe(true);
+    expect(shouldFail(r({ serious: 1 }), "serious")).toBe(true);
+    expect(shouldFail(r({ moderate: 5 }), "serious")).toBe(false);
+  });
+
+  it("fails on critical only when critical present", () => {
+    expect(shouldFail(r({ critical: 1 }), "critical")).toBe(true);
+    expect(shouldFail(r({ serious: 5 }), "critical")).toBe(false);
+  });
+});
+
+describe("lastSelectorSegment", () => {
+  it("returns the final segment", () => {
+    expect(lastSelectorSegment("body > div > button.css-1k9j2m")).toBe("button.css-1k9j2m");
+  });
+
+  it("returns the input when there are no separators", () => {
+    expect(lastSelectorSegment("img")).toBe("img");
+  });
+});
+
 describe("buildMarkdown", () => {
-  it("emits a clean report when nothing fails", () => {
+  it("emits a clean message when nothing fails", () => {
     const md = buildMarkdown(buildReport(raw([]), inputs));
     expect(md).toContain("**No accessibility violations found.**");
     expect(md).toContain("AccessLint audit — https://example.com");
@@ -99,34 +144,90 @@ describe("buildMarkdown", () => {
     expect(md).toContain("(2 below threshold filtered)");
   });
 
-  it("renders a violation table with source locations", () => {
+  it("groups violations by source file using <details> sections", () => {
+    const md = buildMarkdown(
+      buildReport(
+        raw([
+          v({
+            impact: "critical",
+            source: [{ file: "src/Card.tsx", line: 42, column: 7, ownerDepth: 0 }],
+          }),
+          v({
+            impact: "serious",
+            source: [{ file: "src/Card.tsx", line: 88, ownerDepth: 0 }],
+          }),
+          v({
+            impact: "serious",
+            source: [{ file: "src/Header.tsx", line: 5, ownerDepth: 0 }],
+          }),
+        ]),
+        inputs,
+      ),
+    );
+    expect(md).toContain("<details");
+    expect(md).toContain("<strong>src/Card.tsx</strong> — 2 violations");
+    expect(md).toContain("<strong>src/Header.tsx</strong> — 1 violation");
+  });
+
+  it("buckets violations without a source into 'Unmapped'", () => {
+    const md = buildMarkdown(buildReport(raw([v({ impact: "critical" })]), inputs));
+    expect(md).toContain("Unmapped (no source location)");
+  });
+
+  it("uses last selector segment in the table", () => {
+    const md = buildMarkdown(
+      buildReport(
+        raw([
+          v({
+            impact: "critical",
+            selector: "body > div > div > button.css-1k9j2m",
+            source: [{ file: "src/X.tsx", line: 1, ownerDepth: 0 }],
+          }),
+        ]),
+        inputs,
+      ),
+    );
+    expect(md).toContain("`button.css-1k9j2m`");
+    expect(md).not.toContain("body > div > div");
+  });
+
+  it("strips the path prefix from group headings when given", () => {
     const md = buildMarkdown(
       buildReport(
         raw([
           v({
             impact: "critical",
             source: [
-              { file: "src/Card.tsx", line: 42, column: 7, symbol: "Card", ownerDepth: 0 },
+              { file: "file:///home/runner/work/r/r/src/X.tsx", line: 1, ownerDepth: 0 },
             ],
           }),
         ]),
         inputs,
       ),
+      { pathPrefix: "file:///home/runner/work/r/r/" },
     );
-    expect(md).toContain("| Impact | Rule | Source | Element | Message |");
-    expect(md).toContain("`src/Card.tsx:42:7`");
-    expect(md).toContain("(Card)");
+    expect(md).toContain("<strong>src/X.tsx</strong>");
+    expect(md).not.toContain("/home/runner/");
   });
 
-  it("uses an em-dash placeholder when source is absent", () => {
-    const md = buildMarkdown(buildReport(raw([v({ impact: "critical" })]), inputs));
-    expect(md).toContain("| critical | `text-alternatives/img-alt` | — |");
+  it("includes a run-log link when runUrl is provided", () => {
+    const md = buildMarkdown(buildReport(raw([]), inputs), {
+      runUrl: "https://github.com/owner/repo/actions/runs/12345",
+    });
+    expect(md).toContain("[run log](https://github.com/owner/repo/actions/runs/12345)");
   });
 
   it("escapes pipe characters in cell content", () => {
     const md = buildMarkdown(
       buildReport(
-        raw([v({ impact: "critical", message: "Has | pipe in it", selector: "div" })]),
+        raw([
+          v({
+            impact: "critical",
+            message: "Has | pipe in it",
+            selector: "div",
+            source: [{ file: "src/X.tsx", line: 1, ownerDepth: 0 }],
+          }),
+        ]),
         inputs,
       ),
     );

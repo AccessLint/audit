@@ -26,10 +26,13 @@ If you compose with downstream actions that *do* need permissions (`peter-evans/
 | `url` | _(required)_ | URL to audit. Examples: `https://example.com`, `https://pr-123-myapp.preview.dev`, `http://localhost:3000`. |
 | `wcag-level` | `AA` | Conformance level. One of `A`, `AA`, `AAA`. |
 | `min-impact` | `serious` | Drops anything below this from the report. One of `critical`, `serious`, `moderate`, `minor`. |
+| `fail-on` | `never` | Exit non-zero when violations at this level or worse exist. One of `never` (compose your own gate), `any`, `critical`, `serious`, `moderate`, `minor`. |
+| `rules` | `""` | Comma- or whitespace-separated rule IDs to include (allowlist). Empty runs all rules. |
+| `rules-exclude` | `""` | Comma- or whitespace-separated rule IDs to exclude. Example: `landmarks/region,navigable/bypass`. |
 | `wait-for` | `networkidle` | What to wait for after navigation: `load`, `domcontentloaded`, `networkidle`, or a CSS selector like `#app-ready`. |
 | `auth-headers` | `""` | JSON object of HTTP headers (e.g. `'{"Authorization":"Bearer ${{ secrets.PREVIEW_TOKEN }}"}'`). |
-| `output-dir` | `$GITHUB_WORKSPACE` | Where to write `accesslint-report.json` / `accesslint-report.md`. |
-| `install-browser` | `true` | Run `playwright install --only-shell chromium` before auditing. Set `false` if you've cached `~/.cache/ms-playwright` in an earlier step. |
+
+Reports always land at `$GITHUB_WORKSPACE/accesslint-report.json` and `accesslint-report.md`. The browser is installed automatically; cache `~/.cache/ms-playwright` between runs to skip the download (see [Cache the browser](#cache-the-browser-between-runs)).
 
 ## Outputs
 
@@ -38,15 +41,33 @@ If you compose with downstream actions that *do* need permissions (`peter-evans/
 | `violation-count` | Total violations after the `min-impact` filter. |
 | `critical-count` | Critical-impact count. |
 | `serious-count` | Serious-impact count. |
-| `failed` | `true` when `violation-count > 0`, else `false`. |
+| `annotated-count` | Number of violations that landed as inline `::warning file=…::` PR-diff annotations (those with a workspace-relative source path). |
+| `failed` | `true` when `violation-count > 0`. Independent of `fail-on` — `fail-on` controls the action's exit code; this output reports detection. |
 | `report-json-path` | Absolute path to `accesslint-report.json`. |
 | `report-markdown-path` | Absolute path to `accesslint-report.md`. |
 
+## PR-diff annotations
+
+When the audited URL is a React dev build (CRA, Next dev, Vite + React), each violation is mapped back to its source line via React DevTools fibers + sourcemaps. The action emits a `::warning file=src/Card.tsx,line=42,col=7::Insufficient color contrast 3.74:1` per violation, which GitHub renders **inline on the PR diff** at the matching line. No more "scroll up to find the sticky comment" — the squiggle is right where you're reading.
+
+Production builds and non-React pages don't carry source metadata; those violations land in the report's "Unmapped" group and the `Source` column reads `—`.
+
 ## Composition examples
 
-The action does not open PRs, post comments, or fail builds itself. Compose with whichever downstream actions you already use.
+The action exits 0 by default — every common gating pattern is a downstream step. For the most common gate, use `fail-on:` directly.
 
-### Fail the build on critical violations
+### Fail the build on critical violations (one-liner)
+
+```yaml
+- uses: AccessLint/audit@v1
+  with:
+    url: ${{ steps.preview.outputs.url }}
+    fail-on: critical
+```
+
+`fail-on` accepts `never` (default, composition-friendly), `any`, `critical`, `serious`, `moderate`, `minor`. Choose the threshold; the action does the rest.
+
+### Custom gating via the step output
 
 ```yaml
 - uses: AccessLint/audit@v1
@@ -54,11 +75,9 @@ The action does not open PRs, post comments, or fail builds itself. Compose with
   with:
     url: ${{ steps.preview.outputs.url }}
 
-- name: Fail on critical violations
-  if: steps.a11y.outputs.critical-count != '0'
-  run: |
-    echo "::error::${{ steps.a11y.outputs.critical-count }} critical accessibility violations"
-    exit 1
+- name: Custom gate
+  if: steps.a11y.outputs.critical-count > 5
+  run: exit 1
 ```
 
 ### Sticky comment on the PR with the report

@@ -1,5 +1,5 @@
 name: AccessLint Audit
-description: Run a WCAG 2.2 accessibility audit against a live URL and emit JSON + Markdown reports.
+description: Run a WCAG 2.2 accessibility audit against a live URL and emit JSON + Markdown reports with PR-diff annotations.
 author: AccessLint
 branding:
   icon: check-circle
@@ -13,24 +13,25 @@ inputs:
     description: "Conformance level. One of: A, AA, AAA. Default AA."
     default: "AA"
   min-impact:
-    description: "Minimum impact level to include in the report. One of: critical, serious, moderate, minor. Default serious — drops moderate and minor from the output."
+    description: "Minimum impact level to include in the report. One of: critical, serious, moderate, minor. Default serious."
     default: "serious"
+  fail-on:
+    description: "Exit non-zero when the report contains violations at this level or worse. One of: never (default — composition-friendly), any, critical, serious, moderate, minor."
+    default: "never"
+  rules:
+    description: "Allowlist — comma- or whitespace-separated rule IDs to run. Empty (default) runs every rule that passes wcag-level + rules-exclude."
+    default: ""
+  rules-exclude:
+    description: "Denylist — comma- or whitespace-separated rule IDs to skip. Example: 'landmarks/region,navigable/bypass'."
+    default: ""
   wait-for:
-    description: "What to wait for after navigation. Examples: load, domcontentloaded, networkidle (default), or a CSS selector like '#app-ready' / '[data-testid=\"shell-mounted\"]'."
+    description: "What to wait for after navigation. Examples: load, domcontentloaded, networkidle (default), or a CSS selector like '#app-ready'."
     default: "networkidle"
   auth-headers:
     # Avoid literal ${{ ... }} in this description — composite-action descriptions
-    # are template-evaluated when the action loads, and a fake expression breaks
-    # every consumer with 'Unrecognized named-value'. The README has the full
-    # example with secrets interpolation; here we describe the shape only.
+    # are template-evaluated when the action loads.
     description: 'JSON object of HTTP headers for every request. Example shape: {"Authorization":"Bearer <token>","X-Vercel-Protection-Bypass":"<token>"}.'
     default: ""
-  output-dir:
-    description: "Where to write accesslint-report.{json,md}. Defaults to $GITHUB_WORKSPACE so downstream actions can pick the files up directly."
-    default: ""
-  install-browser:
-    description: "Run 'playwright install --only-shell chromium' before auditing. Set 'false' if you've already cached and restored ~/.cache/ms-playwright in an earlier step. Default true."
-    default: "true"
 
 outputs:
   violation-count:
@@ -42,8 +43,11 @@ outputs:
   serious-count:
     description: "Number of serious-impact violations."
     value: ${{ steps.audit.outputs.serious-count }}
+  annotated-count:
+    description: "How many violations had a workspace-relative source location and got an inline `::warning::` annotation."
+    value: ${{ steps.audit.outputs.annotated-count }}
   failed:
-    description: "'true' when violation-count is greater than zero, else 'false'."
+    description: "'true' when violation-count is greater than zero, else 'false'. Independent of fail-on — fail-on controls the exit code; this output reports detection."
     value: ${{ steps.audit.outputs.failed }}
   report-json-path:
     description: "Path to the JSON report file."
@@ -61,7 +65,8 @@ runs:
       run: npm ci --omit=dev --no-audit --no-fund --silent
 
     - name: Install chromium-headless-shell
-      if: ${{ inputs.install-browser == 'true' }}
+      # Always install — caching is the consumer's responsibility via
+      # actions/cache on ~/.cache/ms-playwright (see README).
       shell: bash
       working-directory: ${{ github.action_path }}
       run: npx --yes playwright install --only-shell chromium
@@ -74,10 +79,9 @@ runs:
         INPUT_URL: ${{ inputs.url }}
         INPUT_WCAG-LEVEL: ${{ inputs.wcag-level }}
         INPUT_MIN-IMPACT: ${{ inputs.min-impact }}
+        INPUT_FAIL-ON: ${{ inputs.fail-on }}
+        INPUT_RULES: ${{ inputs.rules }}
+        INPUT_RULES-EXCLUDE: ${{ inputs.rules-exclude }}
         INPUT_WAIT-FOR: ${{ inputs.wait-for }}
         INPUT_AUTH-HEADERS: ${{ inputs.auth-headers }}
-        INPUT_OUTPUT-DIR: ${{ inputs.output-dir }}
-        # Browser install is handled by the composite step above; tell the
-        # main entry not to attempt it again.
-        INPUT_INSTALL-BROWSER: "false"
       run: node dist/index.js

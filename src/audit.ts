@@ -10,6 +10,8 @@ declare const require: NodeJS.Require;
 
 interface InPageOptions {
   includeAAA: boolean;
+  /** Rule IDs to disable. Empty array = all enabled. */
+  disabledRules: string[];
 }
 
 export interface RawAuditResult {
@@ -76,39 +78,53 @@ export async function runAudit(inputs: ActionInputs): Promise<RawAuditResult> {
 
     await page.addScriptTag({ content: iife });
 
-    const opts: InPageOptions = { includeAAA: inputs.wcagLevel === "AAA" };
+    // The `rules` allowlist is implemented as a denylist over the inverse —
+    // since core only takes `disabledRules`, we let the in-page code filter
+    // its own rule list against the allowlist when it's non-empty.
+    const opts: InPageOptions = {
+      includeAAA: inputs.wcagLevel === "AAA",
+      disabledRules: inputs.rulesExclude,
+    };
+    const allowlist = inputs.rules;
 
     // Element refs and other non-cloneable fields can't cross structured-clone,
     // so project violations to a JSON-safe shape inside the page.
-    const result = (await page.evaluate(async (opts: InPageOptions) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const AccessLint = (window as unknown as { AccessLint: any }).AccessLint;
-      if (!AccessLint || typeof AccessLint.runAudit !== "function") {
-        throw new Error("@accesslint/core IIFE did not load on the page.");
-      }
-      const raw = AccessLint.runAudit(document, opts);
-      if (typeof AccessLint.attachReactFiberSource === "function") {
-        try {
-          await AccessLint.attachReactFiberSource(raw.violations);
-        } catch {
-          // Best-effort — never block the audit on source mapping.
+    const result = (await page.evaluate(
+      async ({ opts, allowlist }: { opts: InPageOptions; allowlist: string[] }) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const AccessLint = (window as unknown as { AccessLint: any }).AccessLint;
+        if (!AccessLint || typeof AccessLint.runAudit !== "function") {
+          throw new Error("@accesslint/core IIFE did not load on the page.");
         }
-      }
-      return {
-        url: raw.url,
-        timestamp: raw.timestamp,
-        ruleCount: raw.ruleCount,
-        violations: raw.violations.map((v: Record<string, unknown>) => ({
-          ruleId: v.ruleId,
-          selector: v.selector,
-          html: v.html,
-          impact: v.impact,
-          message: v.message,
-          context: v.context,
-          source: v.source,
-        })),
-      };
-    }, opts)) as RawAuditResult;
+        const raw = AccessLint.runAudit(document, opts);
+        if (typeof AccessLint.attachReactFiberSource === "function") {
+          try {
+            await AccessLint.attachReactFiberSource(raw.violations);
+          } catch {
+            // Best-effort — never block the audit on source mapping.
+          }
+        }
+        const allow = allowlist.length > 0 ? new Set(allowlist) : null;
+        const violations = raw.violations
+          .filter((v: Record<string, unknown>) => !allow || allow.has(v.ruleId as string))
+          .map((v: Record<string, unknown>) => ({
+            ruleId: v.ruleId,
+            selector: v.selector,
+            html: v.html,
+            impact: v.impact,
+            message: v.message,
+            context: v.context,
+            source: v.source,
+          }));
+        return {
+          url: raw.url,
+          timestamp: raw.timestamp,
+          ruleCount: raw.ruleCount,
+          violations,
+        };
+      },
+      { opts, allowlist },
+    )) as RawAuditResult;
 
     return result;
   } finally {
