@@ -1,5 +1,5 @@
 name: AccessLint Audit
-description: Run a WCAG 2.2 accessibility audit against one or more live URLs and emit JSON, Markdown, and SARIF reports with PR-diff annotations.
+description: WCAG 2.2 accessibility audit for any URL. Source-mapped to React/JSX lines, with inline PR annotations and regression mode.
 author: AccessLint
 branding:
   icon: check-circle
