@@ -1,4 +1,4 @@
-import { getInput } from "@actions/core";
+import { getInput, getMultilineInput } from "@actions/core";
 import type { ActionInputs, FailLevel, Impact, WcagLevel } from "./types.js";
 
 const IMPACTS: readonly Impact[] = ["critical", "serious", "moderate", "minor"] as const;
@@ -42,18 +42,50 @@ function parseRuleList(raw: string): string[] {
     .filter((s) => s.length > 0);
 }
 
-export function readInputs(): ActionInputs {
-  const url = getInput("url", { required: true });
-  // Sanity check the URL early so we fail fast with a clear message rather
-  // than a Playwright timeout on a typo.
+function assertValidUrl(name: string, url: string): void {
   try {
     new URL(url);
   } catch {
-    throw new Error(`url: not a valid URL — "${url}"`);
+    throw new Error(`${name}: not a valid URL — "${url}"`);
+  }
+}
+
+/**
+ * Resolve the audit target list. Users may set:
+ * - `url:` (legacy, single URL), or
+ * - `urls:` (one URL per line), or
+ * - both — `urls:` wins, `url:` is ignored.
+ * At least one must be provided and non-empty.
+ */
+function readUrls(): string[] {
+  const single = getInput("url").trim();
+  // getMultilineInput splits on \n and trims each entry.
+  const multi = getMultilineInput("urls").map((u) => u.trim()).filter(Boolean);
+  const list = multi.length > 0 ? multi : single ? [single] : [];
+  if (list.length === 0) {
+    throw new Error("Provide at least one URL via `url:` or `urls:`.");
+  }
+  for (const u of list) assertValidUrl("url", u);
+  return list;
+}
+
+export function readInputs(): ActionInputs {
+  const urls = readUrls();
+  const compareAgainstRaw = getInput("compare-against").trim();
+  const compareAgainst = compareAgainstRaw || undefined;
+  if (compareAgainst) {
+    assertValidUrl("compare-against", compareAgainst);
+    if (urls.length > 1) {
+      throw new Error(
+        "compare-against currently only works with a single audited URL. " +
+          "Either drop `compare-against` or reduce `urls` to one entry.",
+      );
+    }
   }
 
   return {
-    url,
+    urls,
+    compareAgainst,
     wcagLevel: parseEnum("wcag-level", getInput("wcag-level") || "AA", LEVELS),
     minImpact: parseEnum("min-impact", getInput("min-impact") || "serious", IMPACTS),
     failOn: parseEnum("fail-on", getInput("fail-on") || "never", FAIL_LEVELS),

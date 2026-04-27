@@ -23,7 +23,9 @@ If you compose with downstream actions that *do* need permissions (`peter-evans/
 
 | Name | Default | Description |
 | --- | --- | --- |
-| `url` | _(required)_ | URL to audit. Examples: `https://example.com`, `https://pr-123-myapp.preview.dev`, `http://localhost:3000`. |
+| `url` | — | Single URL to audit. One of `url` or `urls` is required. |
+| `urls` | — | One URL per line — audits all and aggregates into one report. Wins over `url` when both set. |
+| `compare-against` | — | Baseline URL for regression mode: only violations *new* in `url` relative to this baseline are reported. Single-URL only. |
 | `wcag-level` | `AA` | Conformance level. One of `A`, `AA`, `AAA`. |
 | `min-impact` | `serious` | Drops anything below this from the report. One of `critical`, `serious`, `moderate`, `minor`. |
 | `fail-on` | `never` | Exit non-zero when violations at this level or worse exist. One of `never` (compose your own gate), `any`, `critical`, `serious`, `moderate`, `minor`. |
@@ -45,6 +47,7 @@ Reports always land at `$GITHUB_WORKSPACE/accesslint-report.json` and `accesslin
 | `failed` | `true` when `violation-count > 0`. Independent of `fail-on` — `fail-on` controls the action's exit code; this output reports detection. |
 | `report-json-path` | Absolute path to `accesslint-report.json`. |
 | `report-markdown-path` | Absolute path to `accesslint-report.md`. |
+| `report-sarif-path` | Absolute path to `accesslint-report.sarif` (SARIF v2.1.0). |
 
 ## PR-diff annotations
 
@@ -79,6 +82,49 @@ The action exits 0 by default — every common gating pattern is a downstream st
   if: steps.a11y.outputs.critical-count > 5
   run: exit 1
 ```
+
+### Audit multiple URLs in one job
+
+```yaml
+- uses: AccessLint/audit@v1
+  with:
+    urls: |
+      ${{ steps.preview.outputs.url }}/
+      ${{ steps.preview.outputs.url }}/dashboard
+      ${{ steps.preview.outputs.url }}/settings
+    fail-on: critical
+```
+
+The Markdown report renders a per-URL `## section`; outputs (`violation-count`, `critical-count`, etc.) are totals across the run.
+
+### Regression mode — only fail on *new* violations
+
+```yaml
+- uses: AccessLint/audit@v1
+  with:
+    url: ${{ steps.preview.outputs.url }}        # the PR build
+    compare-against: https://www.your-app.com    # current production
+    fail-on: any
+```
+
+Audits both URLs and reports only violations present in the candidate but not the baseline. Match key is `ruleId + selector` — works well when the DOM structure is stable between the two pages, less well when selectors are content-dependent.
+
+### Upload SARIF for code scanning
+
+```yaml
+- uses: AccessLint/audit@v1
+  id: a11y
+  with:
+    url: ${{ steps.preview.outputs.url }}
+
+- uses: github/codeql-action/upload-sarif@v3
+  if: always()
+  with:
+    sarif_file: ${{ steps.a11y.outputs.report-sarif-path }}
+    category: accesslint
+```
+
+Violations show up in the repo's **Security → Code scanning** tab and as inline annotations on the PR diff (independently of the `::warning::` annotations the action also emits).
 
 ### Sticky comment on the PR with the report
 

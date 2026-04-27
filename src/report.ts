@@ -1,8 +1,10 @@
 import type {
   ActionInputs,
-  AuditReport,
+  AuditRun,
   FailLevel,
   Impact,
+  LocatedViolation,
+  PerUrlReport,
   SerializedViolation,
   SourceLocation,
 } from "./types.js";
@@ -24,26 +26,31 @@ const IMPACT_EMOJI: Record<Impact, string> = {
   minor: "🟦",
 };
 
-/** Drop violations below the user's min-impact threshold. */
-export function filterByImpact(
-  violations: SerializedViolation[],
+export function filterByImpact<V extends { impact: Impact }>(
+  violations: V[],
   minImpact: Impact,
-): SerializedViolation[] {
+): V[] {
   const threshold = IMPACT_ORDER[minImpact];
   return violations.filter((v) => IMPACT_ORDER[v.impact] <= threshold);
 }
 
-export function countByImpact(violations: SerializedViolation[]): Record<Impact, number> {
+export function countByImpact(
+  violations: { impact: Impact }[],
+): Record<Impact, number> {
   const counts: Record<Impact, number> = { critical: 0, serious: 0, moderate: 0, minor: 0 };
   for (const v of violations) counts[v.impact]++;
   return counts;
 }
 
-export function buildReport(raw: RawAuditResult, inputs: ActionInputs): AuditReport {
-  const filtered = filterByImpact(raw.violations, inputs.minImpact);
+export function buildPerUrlReport(
+  raw: RawAuditResult,
+  url: string,
+  minImpact: Impact,
+): PerUrlReport {
+  const filtered = filterByImpact(raw.violations, minImpact);
   filtered.sort((a, b) => IMPACT_ORDER[a.impact] - IMPACT_ORDER[b.impact]);
   return {
-    url: inputs.url,
+    url,
     generatedAt: new Date(raw.timestamp).toISOString(),
     ruleCount: raw.ruleCount,
     totalViolations: raw.violations.length,
@@ -53,13 +60,52 @@ export function buildReport(raw: RawAuditResult, inputs: ActionInputs): AuditRep
   };
 }
 
-/** True when `count` of `impact` (or worse) meets the fail threshold. */
-export function shouldFail(report: AuditReport, failOn: FailLevel): boolean {
+export interface AggregateOptions {
+  regressionMode?: boolean;
+  baseline?: string;
+}
+
+/** Combine N per-URL reports into a single AuditRun. */
+export function aggregateRun(
+  perUrl: PerUrlReport[],
+  opts: AggregateOptions = {},
+): AuditRun {
+  const violations: LocatedViolation[] = [];
+  for (const p of perUrl) {
+    for (const v of p.violations) violations.push({ ...v, url: p.url });
+  }
+  return {
+    regressionMode: !!opts.regressionMode,
+    baseline: opts.baseline,
+    generatedAt: new Date().toISOString(),
+    totalViolations: perUrl.reduce((n, p) => n + p.totalViolations, 0),
+    filteredViolations: violations.length,
+    counts: countByImpact(violations),
+    violations,
+    urls: perUrl,
+  };
+}
+
+/** Returns a fresh PerUrlReport with `violations` replaced by `subset`. */
+export function withFilteredViolations(
+  report: PerUrlReport,
+  subset: SerializedViolation[],
+): PerUrlReport {
+  const sorted = [...subset].sort((a, b) => IMPACT_ORDER[a.impact] - IMPACT_ORDER[b.impact]);
+  return {
+    ...report,
+    filteredViolations: sorted.length,
+    counts: countByImpact(sorted),
+    violations: sorted,
+  };
+}
+
+export function shouldFail(run: AuditRun, failOn: FailLevel): boolean {
   if (failOn === "never") return false;
-  if (failOn === "any") return report.filteredViolations > 0;
+  if (failOn === "any") return run.filteredViolations > 0;
   const threshold = IMPACT_ORDER[failOn];
   return ALL_IMPACTS.some(
-    (i) => IMPACT_ORDER[i] <= threshold && (report.counts[i] ?? 0) > 0,
+    (i) => IMPACT_ORDER[i] <= threshold && (run.counts[i] ?? 0) > 0,
   );
 }
 
@@ -67,11 +113,6 @@ function escapeMd(text: string): string {
   return text.replace(/\|/g, "\\|").replace(/\n/g, " ");
 }
 
-/**
- * Reduce a deep selector to the last meaningful segment. Long selector
- * paths in the Markdown lose signal — `body > div > … > button.css-1k9j2m`
- * is just `button.css-1k9j2m` once you have a Source: line.
- */
 export function lastSelectorSegment(selector: string): string {
   const segments = selector.split(/\s*>\s*/);
   return segments[segments.length - 1] ?? selector;
@@ -89,8 +130,6 @@ function formatSourceCell(source: SourceLocation[] | undefined, pathPrefix: stri
   return `\`${escapeMd(trimPrefix(first.file, pathPrefix))}:${pos}\`${escapeMd(symbol)}`;
 }
 
-/** Group violations by their first source file path; violations without a
- *  source land in a synthetic "Unmapped" group at the end. */
 function groupByFile(
   violations: SerializedViolation[],
 ): { file: string; violations: SerializedViolation[] }[] {
@@ -105,7 +144,6 @@ function groupByFile(
     }
     bucket.push(v);
   }
-  // Stable order: preserve insertion order, but float Unmapped to the end.
   const out: { file: string; violations: SerializedViolation[] }[] = [];
   let unmapped: SerializedViolation[] | undefined;
   for (const [file, vs] of groups) {
@@ -126,7 +164,6 @@ function formatFileGroup(
     .map((i) => `${counts[i]} ${i}`)
     .join(", ");
 
-  // Trim the path prefix when present so the group header reads cleanly.
   const heading = trimPrefix(group.file, pathPrefix);
   lines.push(`<details${counts.critical > 0 || counts.serious > 0 ? " open" : ""}>`);
   lines.push(
@@ -154,50 +191,81 @@ function formatFileGroup(
   return lines;
 }
 
-export interface MarkdownContext {
-  /** GitHub Actions run URL — included in the footer when provided. */
-  runUrl?: string;
-  /**
-   * Common prefix to strip from source-file paths in group headings (e.g. a
-   * workspace path like '/home/runner/work/repo/repo/'). Only affects display.
-   */
-  pathPrefix?: string;
-}
-
-export function buildMarkdown(report: AuditReport, ctx: MarkdownContext = {}): string {
-  const { url, counts, totalViolations, filteredViolations, violations, generatedAt } = report;
-  const summaryParts = ALL_IMPACTS.flatMap((i) =>
-    counts[i] > 0 ? [`${IMPACT_EMOJI[i]} ${counts[i]} ${i}`] : [],
-  );
-  const summary = summaryParts.length ? summaryParts.join(", ") : "no violations";
-
-  const lines: string[] = [];
-  lines.push(`# AccessLint audit — ${url}`);
-  lines.push("");
+function formatPerUrl(report: PerUrlReport, pathPrefix: string): string[] {
+  const { violations, totalViolations, filteredViolations, counts } = report;
+  const out: string[] = [];
 
   if (filteredViolations === 0) {
     if (totalViolations === 0) {
-      lines.push("**No accessibility violations found.** ✅");
+      out.push("**No accessibility violations found.** ✅");
     } else {
-      lines.push(
+      out.push(
         `**No violations at the configured threshold** (${totalViolations} below threshold filtered).`,
       );
     }
-  } else {
-    const filteredOut = totalViolations - filteredViolations;
-    const noteSuffix = filteredOut > 0 ? ` _(+${filteredOut} below threshold)_` : "";
+    return out;
+  }
+
+  const summary = ALL_IMPACTS.flatMap((i) =>
+    counts[i] > 0 ? [`${IMPACT_EMOJI[i]} ${counts[i]} ${i}`] : [],
+  ).join(", ");
+  const filteredOut = totalViolations - filteredViolations;
+  const noteSuffix = filteredOut > 0 ? ` _(+${filteredOut} below threshold)_` : "";
+  out.push(
+    `**${filteredViolations} violation${filteredViolations === 1 ? "" : "s"}**: ${summary}${noteSuffix}.`,
+  );
+  out.push("");
+  for (const group of groupByFile(violations)) {
+    out.push(...formatFileGroup(group, pathPrefix));
+    out.push("");
+  }
+  return out;
+}
+
+export interface MarkdownContext {
+  runUrl?: string;
+  pathPrefix?: string;
+}
+
+export function buildMarkdown(run: AuditRun, ctx: MarkdownContext = {}): string {
+  const lines: string[] = [];
+  const isMulti = run.urls.length > 1;
+  const pathPrefix = ctx.pathPrefix ?? "";
+
+  if (run.regressionMode) {
+    lines.push(`# AccessLint regression audit`);
+    lines.push("");
     lines.push(
-      `**${filteredViolations} violation${filteredViolations === 1 ? "" : "s"}**: ${summary}${noteSuffix}.`,
+      `Comparing **${run.urls[0]?.url}** against baseline **${run.baseline}**. Only violations *new* in the candidate are reported below.`,
     );
     lines.push("");
-    for (const group of groupByFile(violations)) {
-      lines.push(...formatFileGroup(group, ctx.pathPrefix ?? ""));
+  } else if (isMulti) {
+    lines.push(`# AccessLint audit — ${run.urls.length} URLs`);
+    lines.push("");
+    const summary = ALL_IMPACTS.flatMap((i) =>
+      run.counts[i] > 0 ? [`${IMPACT_EMOJI[i]} ${run.counts[i]} ${i}`] : [],
+    ).join(", ");
+    lines.push(
+      run.filteredViolations === 0
+        ? "**No accessibility violations found across any URL.** ✅"
+        : `**${run.filteredViolations} violations across ${run.urls.length} URLs**: ${summary || "—"}.`,
+    );
+    lines.push("");
+  } else {
+    lines.push(`# AccessLint audit — ${run.urls[0]?.url}`);
+    lines.push("");
+  }
+
+  for (const per of run.urls) {
+    if (isMulti) {
+      lines.push(`## ${per.url}`);
       lines.push("");
     }
+    lines.push(...formatPerUrl(per, pathPrefix));
   }
 
   lines.push(
-    `<sub>Generated ${generatedAt}` +
+    `<sub>Generated ${run.generatedAt}` +
       (ctx.runUrl ? ` · [run log](${ctx.runUrl})` : "") +
       ` · [\`AccessLint/audit\`](https://github.com/AccessLint/audit)</sub>`,
   );

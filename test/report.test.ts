@@ -1,13 +1,15 @@
 import { describe, it, expect } from "vitest";
 import {
-  buildReport,
+  buildPerUrlReport,
   buildMarkdown,
   filterByImpact,
   countByImpact,
   shouldFail,
   lastSelectorSegment,
+  aggregateRun,
+  withFilteredViolations,
 } from "../src/report.js";
-import type { ActionInputs, SerializedViolation } from "../src/types.js";
+import type { ActionInputs, AuditRun, SerializedViolation } from "../src/types.js";
 import type { RawAuditResult } from "../src/audit.js";
 
 function v(overrides: Partial<SerializedViolation> = {}): SerializedViolation {
@@ -22,7 +24,7 @@ function v(overrides: Partial<SerializedViolation> = {}): SerializedViolation {
 }
 
 const inputs: ActionInputs = {
-  url: "https://example.com",
+  urls: ["https://example.com"],
   wcagLevel: "AA",
   minImpact: "serious",
   failOn: "never",
@@ -38,6 +40,12 @@ const raw = (violations: SerializedViolation[]): RawAuditResult => ({
   ruleCount: 100,
   violations,
 });
+
+const reportFor = (violations: SerializedViolation[], minImpact = inputs.minImpact) =>
+  buildPerUrlReport(raw(violations), inputs.urls[0]!, minImpact);
+
+const runFor = (violations: SerializedViolation[], minImpact = inputs.minImpact) =>
+  aggregateRun([reportFor(violations, minImpact)]);
 
 describe("filterByImpact", () => {
   it("keeps violations at or above the threshold", () => {
@@ -70,16 +78,13 @@ describe("countByImpact", () => {
   });
 });
 
-describe("buildReport", () => {
+describe("buildPerUrlReport", () => {
   it("filters, sorts by severity, and computes counts", () => {
-    const r = buildReport(
-      raw([
-        v({ impact: "minor", ruleId: "minor-rule" }),
-        v({ impact: "critical", ruleId: "critical-rule" }),
-        v({ impact: "serious", ruleId: "serious-rule" }),
-      ]),
-      inputs,
-    );
+    const r = reportFor([
+      v({ impact: "minor", ruleId: "minor-rule" }),
+      v({ impact: "critical", ruleId: "critical-rule" }),
+      v({ impact: "serious", ruleId: "serious-rule" }),
+    ]);
     expect(r.totalViolations).toBe(3);
     expect(r.filteredViolations).toBe(2);
     expect(r.violations.map((x) => x.ruleId)).toEqual(["critical-rule", "serious-rule"]);
@@ -87,15 +92,55 @@ describe("buildReport", () => {
   });
 });
 
+describe("aggregateRun", () => {
+  it("sums counts and tags violations with their URL", () => {
+    const a = buildPerUrlReport(raw([v({ impact: "critical" })]), "https://a.com", "minor");
+    const b = buildPerUrlReport(
+      raw([v({ impact: "serious" }), v({ impact: "minor" })]),
+      "https://b.com",
+      "minor",
+    );
+    const run = aggregateRun([a, b]);
+    expect(run.urls).toHaveLength(2);
+    expect(run.filteredViolations).toBe(3);
+    expect(run.counts).toEqual({ critical: 1, serious: 1, moderate: 0, minor: 1 });
+    expect(run.violations.map((x) => x.url)).toEqual([
+      "https://a.com",
+      "https://b.com",
+      "https://b.com",
+    ]);
+  });
+
+  it("propagates regression metadata", () => {
+    const r = buildPerUrlReport(raw([]), "https://c.com", "serious");
+    const run = aggregateRun([r], { regressionMode: true, baseline: "https://main.example" });
+    expect(run.regressionMode).toBe(true);
+    expect(run.baseline).toBe("https://main.example");
+  });
+});
+
+describe("withFilteredViolations", () => {
+  it("returns a fresh PerUrlReport reflecting the new subset", () => {
+    const orig = reportFor([
+      v({ impact: "critical", ruleId: "a" }),
+      v({ impact: "serious", ruleId: "b" }),
+      v({ impact: "moderate", ruleId: "c" }),
+    ]);
+    const subset = orig.violations.filter((x) => x.ruleId !== "b");
+    const next = withFilteredViolations(orig, subset);
+    expect(next.violations.map((x) => x.ruleId)).toEqual(["a"]);
+    expect(next.counts).toEqual({ critical: 1, serious: 0, moderate: 0, minor: 0 });
+    expect(next.totalViolations).toBe(orig.totalViolations); // unchanged
+  });
+});
+
 describe("shouldFail", () => {
   const r = (counts: Partial<Record<"critical" | "serious" | "moderate" | "minor", number>>) =>
-    buildReport(
-      raw(
-        (Object.entries(counts) as [SerializedViolation["impact"], number][]).flatMap(
-          ([impact, n]) => Array.from({ length: n }, () => v({ impact })),
-        ),
+    runFor(
+      (Object.entries(counts) as [SerializedViolation["impact"], number][]).flatMap(
+        ([impact, n]) => Array.from({ length: n }, () => v({ impact })),
       ),
-      { ...inputs, minImpact: "minor" },
+      "minor",
     );
 
   it("never fails when fail-on=never", () => {
@@ -129,25 +174,23 @@ describe("lastSelectorSegment", () => {
   });
 });
 
-describe("buildMarkdown", () => {
+describe("buildMarkdown — single URL", () => {
   it("emits a clean message when nothing fails", () => {
-    const md = buildMarkdown(buildReport(raw([]), inputs));
+    const md = buildMarkdown(runFor([]));
     expect(md).toContain("**No accessibility violations found.**");
     expect(md).toContain("AccessLint audit — https://example.com");
   });
 
   it("notes filtered-out violations when threshold drops them all", () => {
-    const md = buildMarkdown(
-      buildReport(raw([v({ impact: "minor" }), v({ impact: "minor" })]), inputs),
-    );
+    const md = buildMarkdown(runFor([v({ impact: "minor" }), v({ impact: "minor" })]));
     expect(md).toContain("**No violations at the configured threshold**");
     expect(md).toContain("(2 below threshold filtered)");
   });
 
   it("groups violations by source file using <details> sections", () => {
     const md = buildMarkdown(
-      buildReport(
-        raw([
+      runFor(
+        [
           v({
             impact: "critical",
             source: [{ file: "src/Card.tsx", line: 42, column: 7, ownerDepth: 0 }],
@@ -160,8 +203,8 @@ describe("buildMarkdown", () => {
             impact: "serious",
             source: [{ file: "src/Header.tsx", line: 5, ownerDepth: 0 }],
           }),
-        ]),
-        inputs,
+        ],
+        "minor",
       ),
     );
     expect(md).toContain("<details");
@@ -170,39 +213,39 @@ describe("buildMarkdown", () => {
   });
 
   it("buckets violations without a source into 'Unmapped'", () => {
-    const md = buildMarkdown(buildReport(raw([v({ impact: "critical" })]), inputs));
+    const md = buildMarkdown(runFor([v({ impact: "critical" })]));
     expect(md).toContain("Unmapped (no source location)");
   });
 
   it("uses last selector segment in the table", () => {
     const md = buildMarkdown(
-      buildReport(
-        raw([
+      runFor(
+        [
           v({
             impact: "critical",
             selector: "body > div > div > button.css-1k9j2m",
             source: [{ file: "src/X.tsx", line: 1, ownerDepth: 0 }],
           }),
-        ]),
-        inputs,
+        ],
+        "critical",
       ),
     );
     expect(md).toContain("`button.css-1k9j2m`");
     expect(md).not.toContain("body > div > div");
   });
 
-  it("strips the path prefix from group headings when given", () => {
+  it("strips the path prefix from group headings and source cells", () => {
     const md = buildMarkdown(
-      buildReport(
-        raw([
+      runFor(
+        [
           v({
             impact: "critical",
             source: [
               { file: "file:///home/runner/work/r/r/src/X.tsx", line: 1, ownerDepth: 0 },
             ],
           }),
-        ]),
-        inputs,
+        ],
+        "critical",
       ),
       { pathPrefix: "file:///home/runner/work/r/r/" },
     );
@@ -211,7 +254,7 @@ describe("buildMarkdown", () => {
   });
 
   it("includes a run-log link when runUrl is provided", () => {
-    const md = buildMarkdown(buildReport(raw([]), inputs), {
+    const md = buildMarkdown(runFor([]), {
       runUrl: "https://github.com/owner/repo/actions/runs/12345",
     });
     expect(md).toContain("[run log](https://github.com/owner/repo/actions/runs/12345)");
@@ -219,18 +262,57 @@ describe("buildMarkdown", () => {
 
   it("escapes pipe characters in cell content", () => {
     const md = buildMarkdown(
-      buildReport(
-        raw([
+      runFor(
+        [
           v({
             impact: "critical",
             message: "Has | pipe in it",
             selector: "div",
             source: [{ file: "src/X.tsx", line: 1, ownerDepth: 0 }],
           }),
-        ]),
-        inputs,
+        ],
+        "critical",
       ),
     );
     expect(md).toContain("Has \\| pipe in it");
+  });
+});
+
+describe("buildMarkdown — multi-URL", () => {
+  it("renders an H1 with the URL count and per-URL H2 sections", () => {
+    const a = buildPerUrlReport(raw([v({ impact: "critical", ruleId: "a" })]), "https://a.com", "minor");
+    const b = buildPerUrlReport(raw([v({ impact: "serious", ruleId: "b" })]), "https://b.com", "minor");
+    const md = buildMarkdown(aggregateRun([a, b]));
+    expect(md).toContain("# AccessLint audit — 2 URLs");
+    expect(md).toContain("**2 violations across 2 URLs**");
+    expect(md).toContain("## https://a.com");
+    expect(md).toContain("## https://b.com");
+  });
+
+  it("emits a clean run summary when no URL has violations", () => {
+    const a = buildPerUrlReport(raw([]), "https://a.com", "serious");
+    const b = buildPerUrlReport(raw([]), "https://b.com", "serious");
+    const md = buildMarkdown(aggregateRun([a, b]));
+    expect(md).toContain("No accessibility violations found across any URL.");
+  });
+});
+
+describe("buildMarkdown — regression mode", () => {
+  it("renders a regression header with baseline and candidate URLs", () => {
+    const candidate = buildPerUrlReport(
+      raw([v({ impact: "critical" })]),
+      "https://pr.example.com",
+      "minor",
+    );
+    const md = buildMarkdown(
+      aggregateRun([candidate], {
+        regressionMode: true,
+        baseline: "https://main.example.com",
+      }),
+    );
+    expect(md).toContain("# AccessLint regression audit");
+    expect(md).toContain("https://pr.example.com");
+    expect(md).toContain("https://main.example.com");
+    expect(md).toContain("Only violations *new* in the candidate are reported");
   });
 });

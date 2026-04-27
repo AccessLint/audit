@@ -2,13 +2,11 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setOutput, setFailed, info, summary } from "@actions/core";
 import { readInputs } from "./inputs.js";
-import { runAudit } from "./audit.js";
-import { buildReport, buildMarkdown, shouldFail } from "./report.js";
+import { runAll } from "./orchestrator.js";
+import { buildMarkdown, shouldFail } from "./report.js";
 import { emitAnnotations } from "./annotations.js";
+import { buildSarif } from "./sarif.js";
 
-/** Bail out clearly if the runner shipped Node < 24 — esbuild target is
- *  node24 and Node 20 is removed from runners 2026-09-16. Friendlier than
- *  letting a syntax error crash the bundle. */
 function assertNodeVersion(): void {
   const major = Number(process.versions.node.split(".")[0]);
   if (Number.isFinite(major) && major < 20) {
@@ -23,40 +21,42 @@ async function run(): Promise<void> {
   assertNodeVersion();
   const inputs = readInputs();
 
+  const targetSummary =
+    inputs.urls.length === 1 ? inputs.urls[0]! : `${inputs.urls.length} URLs`;
+  const modeSummary = inputs.compareAgainst
+    ? ` (regression vs ${inputs.compareAgainst})`
+    : "";
   info(
-    `Auditing ${inputs.url} (WCAG ${inputs.wcagLevel}, min impact ${inputs.minImpact}, fail-on ${inputs.failOn})`,
+    `Auditing ${targetSummary}${modeSummary} — WCAG ${inputs.wcagLevel}, min impact ${inputs.minImpact}, fail-on ${inputs.failOn}`,
   );
 
-  const raw = await runAudit(inputs);
-  const report = buildReport(raw, inputs);
+  const auditRun = await runAll(inputs);
 
   const workspace = process.env.GITHUB_WORKSPACE ?? process.cwd();
   const jsonPath = join(workspace, "accesslint-report.json");
   const mdPath = join(workspace, "accesslint-report.md");
+  const sarifPath = join(workspace, "accesslint-report.sarif");
 
-  // Workspace-relative source paths trim the long `/home/runner/work/...`
-  // prefix from group headings in the Markdown.
   const pathPrefix = workspaceFilePrefix(workspace);
   const runUrl = buildRunUrl();
-  const markdown = buildMarkdown(report, { pathPrefix, runUrl });
+  const markdown = buildMarkdown(auditRun, { pathPrefix, runUrl });
+  const sarif = buildSarif(auditRun, workspace);
 
-  writeFileSync(jsonPath, JSON.stringify(report, null, 2) + "\n", "utf8");
+  writeFileSync(jsonPath, JSON.stringify(auditRun, null, 2) + "\n", "utf8");
   writeFileSync(mdPath, markdown, "utf8");
+  writeFileSync(sarifPath, JSON.stringify(sarif, null, 2) + "\n", "utf8");
 
-  // Inline PR-diff annotations: `::warning file=…,line=…::` lands the
-  // violation right on the changed line in the PR review tab.
-  const annotated = emitAnnotations(report.violations, workspace);
+  const annotated = emitAnnotations(auditRun.violations, workspace);
 
-  setOutput("violation-count", report.filteredViolations);
-  setOutput("critical-count", report.counts.critical);
-  setOutput("serious-count", report.counts.serious);
+  setOutput("violation-count", auditRun.filteredViolations);
+  setOutput("critical-count", auditRun.counts.critical);
+  setOutput("serious-count", auditRun.counts.serious);
   setOutput("annotated-count", annotated);
-  setOutput("failed", report.filteredViolations > 0 ? "true" : "false");
+  setOutput("failed", auditRun.filteredViolations > 0 ? "true" : "false");
   setOutput("report-json-path", jsonPath);
   setOutput("report-markdown-path", mdPath);
+  setOutput("report-sarif-path", sarifPath);
 
-  // Surface the markdown in the run summary so it's visible without
-  // downloading the artifact.
   if (process.env.GITHUB_STEP_SUMMARY) {
     try {
       await summary.addRaw(markdown).write();
@@ -66,26 +66,23 @@ async function run(): Promise<void> {
   }
 
   info(
-    `Audit complete: ${report.filteredViolations}/${report.totalViolations} violations after filter ` +
-      `(${report.counts.critical} critical, ${report.counts.serious} serious). ` +
+    `Audit complete: ${auditRun.filteredViolations}/${auditRun.totalViolations} violations after filter ` +
+      `(${auditRun.counts.critical} critical, ${auditRun.counts.serious} serious). ` +
       `${annotated} inline annotation${annotated === 1 ? "" : "s"} emitted.`,
   );
 
-  if (shouldFail(report, inputs.failOn)) {
+  if (shouldFail(auditRun, inputs.failOn)) {
     setFailed(
-      `accessibility threshold failed (fail-on=${inputs.failOn}, violations=${report.filteredViolations})`,
+      `accessibility threshold failed (fail-on=${inputs.failOn}, violations=${auditRun.filteredViolations})`,
     );
   }
 }
 
-/** Build the file:// URL prefix that the fiber-source probe emits in CI,
- *  so we can strip it from group headings in the Markdown. */
 function workspaceFilePrefix(workspace: string): string {
   const ws = workspace.endsWith("/") ? workspace : workspace + "/";
   return `file://${ws}`;
 }
 
-/** Construct the run-log URL when running inside GitHub Actions. */
 function buildRunUrl(): string | undefined {
   const server = process.env.GITHUB_SERVER_URL;
   const repo = process.env.GITHUB_REPOSITORY;

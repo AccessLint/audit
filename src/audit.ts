@@ -36,7 +36,7 @@ async function applyWait(page: Page, waitFor: string): Promise<void> {
   await page.waitForSelector(waitFor, { timeout: 30_000 });
 }
 
-export async function runAudit(inputs: ActionInputs): Promise<RawAuditResult> {
+export async function runAudit(inputs: ActionInputs, url: string): Promise<RawAuditResult> {
   const iife = loadIifeBytes();
 
   let browser: Browser | undefined;
@@ -49,14 +49,14 @@ export async function runAudit(inputs: ActionInputs): Promise<RawAuditResult> {
     const page = await context.newPage();
 
     try {
-      await page.goto(inputs.url, { waitUntil: "load", timeout: 60_000 });
+      await page.goto(url, { waitUntil: "load", timeout: 60_000 });
     } catch (err) {
       // Reframe the Playwright stack as a user-facing message that names the
       // most likely fixes — auth-headers for protected previews, wait-for
       // budget for slow loads, network reachability for dev servers.
       const reason = err instanceof Error ? err.message : String(err);
       throw new Error(
-        `Failed to load ${inputs.url}: ${reason}\n` +
+        `Failed to load ${url}: ${reason}\n` +
           `Common fixes:\n` +
           `  • Protected preview? Pass 'auth-headers' with the right Authorization or bypass token.\n` +
           `  • Slow startup? Increase 'wait-for' or wait on a specific selector.\n` +

@@ -1,5 +1,5 @@
 name: AccessLint Audit
-description: Run a WCAG 2.2 accessibility audit against a live URL and emit JSON + Markdown reports with PR-diff annotations.
+description: Run a WCAG 2.2 accessibility audit against one or more live URLs and emit JSON, Markdown, and SARIF reports with PR-diff annotations.
 author: AccessLint
 branding:
   icon: check-circle
@@ -7,8 +7,14 @@ branding:
 
 inputs:
   url:
-    description: "URL to audit. Examples: https://example.com, https://pr-123-myapp.preview.dev, http://localhost:3000."
-    required: true
+    description: "Single URL to audit. Use `urls` for multiple. One of `url` or `urls` is required."
+    default: ""
+  urls:
+    description: "One URL per line. Audits each, aggregates into one report. Mutually exclusive with `url` (urls wins when both are set)."
+    default: ""
+  compare-against:
+    description: "Baseline URL — when set, only violations *new* in `url` relative to this baseline are reported. Single-URL only; combining with `urls` errors."
+    default: ""
   wcag-level:
     description: "Conformance level. One of: A, AA, AAA. Default AA."
     default: "AA"
@@ -35,7 +41,7 @@ inputs:
 
 outputs:
   violation-count:
-    description: "Total violations after the min-impact filter."
+    description: "Total violations after the min-impact filter (across all URLs in multi-URL mode)."
     value: ${{ steps.audit.outputs.violation-count }}
   critical-count:
     description: "Number of critical-impact violations."
@@ -55,6 +61,9 @@ outputs:
   report-markdown-path:
     description: "Path to the Markdown report file."
     value: ${{ steps.audit.outputs.report-markdown-path }}
+  report-sarif-path:
+    description: "Path to the SARIF v2.1.0 report. Pipe to github/codeql-action/upload-sarif to surface violations in the Security tab."
+    value: ${{ steps.audit.outputs.report-sarif-path }}
 
 runs:
   using: composite
@@ -65,8 +74,6 @@ runs:
       run: npm ci --omit=dev --no-audit --no-fund --silent
 
     - name: Install chromium-headless-shell
-      # Always install — caching is the consumer's responsibility via
-      # actions/cache on ~/.cache/ms-playwright (see README).
       shell: bash
       working-directory: ${{ github.action_path }}
       run: npx --yes playwright install --only-shell chromium
@@ -77,6 +84,8 @@ runs:
       working-directory: ${{ github.action_path }}
       env:
         INPUT_URL: ${{ inputs.url }}
+        INPUT_URLS: ${{ inputs.urls }}
+        INPUT_COMPARE-AGAINST: ${{ inputs.compare-against }}
         INPUT_WCAG-LEVEL: ${{ inputs.wcag-level }}
         INPUT_MIN-IMPACT: ${{ inputs.min-impact }}
         INPUT_FAIL-ON: ${{ inputs.fail-on }}

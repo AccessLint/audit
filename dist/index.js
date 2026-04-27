@@ -19112,6 +19112,13 @@ function getInput(name, options) {
   }
   return val.trim();
 }
+function getMultilineInput(name, options) {
+  const inputs = getInput(name, options).split("\n").filter((x) => x !== "");
+  if (options && options.trimWhitespace === false) {
+    return inputs;
+  }
+  return inputs.map((input) => input.trim());
+}
 function setOutput(name, value) {
   const filePath = process.env["GITHUB_OUTPUT"] || "";
   if (filePath) {
@@ -19168,15 +19175,38 @@ function parseEnum(name, value, allowed) {
 function parseRuleList(raw) {
   return raw.split(/[\s,]+/).map((s) => s.trim()).filter((s) => s.length > 0);
 }
-function readInputs() {
-  const url = getInput("url", { required: true });
+function assertValidUrl(name, url) {
   try {
     new URL(url);
   } catch {
-    throw new Error(`url: not a valid URL \u2014 "${url}"`);
+    throw new Error(`${name}: not a valid URL \u2014 "${url}"`);
+  }
+}
+function readUrls() {
+  const single = getInput("url").trim();
+  const multi = getMultilineInput("urls").map((u) => u.trim()).filter(Boolean);
+  const list = multi.length > 0 ? multi : single ? [single] : [];
+  if (list.length === 0) {
+    throw new Error("Provide at least one URL via `url:` or `urls:`.");
+  }
+  for (const u of list) assertValidUrl("url", u);
+  return list;
+}
+function readInputs() {
+  const urls = readUrls();
+  const compareAgainstRaw = getInput("compare-against").trim();
+  const compareAgainst = compareAgainstRaw || void 0;
+  if (compareAgainst) {
+    assertValidUrl("compare-against", compareAgainst);
+    if (urls.length > 1) {
+      throw new Error(
+        "compare-against currently only works with a single audited URL. Either drop `compare-against` or reduce `urls` to one entry."
+      );
+    }
   }
   return {
-    url,
+    urls,
+    compareAgainst,
     wcagLevel: parseEnum("wcag-level", getInput("wcag-level") || "AA", LEVELS),
     minImpact: parseEnum("min-impact", getInput("min-impact") || "serious", IMPACTS),
     failOn: parseEnum("fail-on", getInput("fail-on") || "never", FAIL_LEVELS),
@@ -19201,7 +19231,7 @@ async function applyWait(page, waitFor) {
   }
   await page.waitForSelector(waitFor, { timeout: 3e4 });
 }
-async function runAudit(inputs) {
+async function runAudit(inputs, url) {
   const iife = loadIifeBytes();
   let browser;
   try {
@@ -19211,11 +19241,11 @@ async function runAudit(inputs) {
     });
     const page = await context.newPage();
     try {
-      await page.goto(inputs.url, { waitUntil: "load", timeout: 6e4 });
+      await page.goto(url, { waitUntil: "load", timeout: 6e4 });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       throw new Error(
-        `Failed to load ${inputs.url}: ${reason}
+        `Failed to load ${url}: ${reason}
 Common fixes:
   \u2022 Protected preview? Pass 'auth-headers' with the right Authorization or bypass token.
   \u2022 Slow startup? Increase 'wait-for' or wait on a specific selector.
@@ -19298,11 +19328,11 @@ function countByImpact(violations) {
   for (const v of violations) counts[v.impact]++;
   return counts;
 }
-function buildReport(raw, inputs) {
-  const filtered = filterByImpact(raw.violations, inputs.minImpact);
+function buildPerUrlReport(raw, url, minImpact) {
+  const filtered = filterByImpact(raw.violations, minImpact);
   filtered.sort((a, b) => IMPACT_ORDER[a.impact] - IMPACT_ORDER[b.impact]);
   return {
-    url: inputs.url,
+    url,
     generatedAt: new Date(raw.timestamp).toISOString(),
     ruleCount: raw.ruleCount,
     totalViolations: raw.violations.length,
@@ -19311,12 +19341,37 @@ function buildReport(raw, inputs) {
     violations: filtered
   };
 }
-function shouldFail(report, failOn) {
+function aggregateRun(perUrl, opts = {}) {
+  const violations = [];
+  for (const p of perUrl) {
+    for (const v of p.violations) violations.push({ ...v, url: p.url });
+  }
+  return {
+    regressionMode: !!opts.regressionMode,
+    baseline: opts.baseline,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    totalViolations: perUrl.reduce((n, p) => n + p.totalViolations, 0),
+    filteredViolations: violations.length,
+    counts: countByImpact(violations),
+    violations,
+    urls: perUrl
+  };
+}
+function withFilteredViolations(report, subset) {
+  const sorted = [...subset].sort((a, b) => IMPACT_ORDER[a.impact] - IMPACT_ORDER[b.impact]);
+  return {
+    ...report,
+    filteredViolations: sorted.length,
+    counts: countByImpact(sorted),
+    violations: sorted
+  };
+}
+function shouldFail(run2, failOn) {
   if (failOn === "never") return false;
-  if (failOn === "any") return report.filteredViolations > 0;
+  if (failOn === "any") return run2.filteredViolations > 0;
   const threshold = IMPACT_ORDER[failOn];
   return ALL_IMPACTS.some(
-    (i) => IMPACT_ORDER[i] <= threshold && (report.counts[i] ?? 0) > 0
+    (i) => IMPACT_ORDER[i] <= threshold && (run2.counts[i] ?? 0) > 0
   );
 }
 function escapeMd(text) {
@@ -19384,39 +19439,106 @@ function formatFileGroup(group, pathPrefix) {
   lines.push("</details>");
   return lines;
 }
-function buildMarkdown(report, ctx = {}) {
-  const { url, counts, totalViolations, filteredViolations, violations, generatedAt } = report;
-  const summaryParts = ALL_IMPACTS.flatMap(
-    (i) => counts[i] > 0 ? [`${IMPACT_EMOJI[i]} ${counts[i]} ${i}`] : []
-  );
-  const summary2 = summaryParts.length ? summaryParts.join(", ") : "no violations";
-  const lines = [];
-  lines.push(`# AccessLint audit \u2014 ${url}`);
-  lines.push("");
+function formatPerUrl(report, pathPrefix) {
+  const { violations, totalViolations, filteredViolations, counts } = report;
+  const out = [];
   if (filteredViolations === 0) {
     if (totalViolations === 0) {
-      lines.push("**No accessibility violations found.** \u2705");
+      out.push("**No accessibility violations found.** \u2705");
     } else {
-      lines.push(
+      out.push(
         `**No violations at the configured threshold** (${totalViolations} below threshold filtered).`
       );
     }
-  } else {
-    const filteredOut = totalViolations - filteredViolations;
-    const noteSuffix = filteredOut > 0 ? ` _(+${filteredOut} below threshold)_` : "";
+    return out;
+  }
+  const summary2 = ALL_IMPACTS.flatMap(
+    (i) => counts[i] > 0 ? [`${IMPACT_EMOJI[i]} ${counts[i]} ${i}`] : []
+  ).join(", ");
+  const filteredOut = totalViolations - filteredViolations;
+  const noteSuffix = filteredOut > 0 ? ` _(+${filteredOut} below threshold)_` : "";
+  out.push(
+    `**${filteredViolations} violation${filteredViolations === 1 ? "" : "s"}**: ${summary2}${noteSuffix}.`
+  );
+  out.push("");
+  for (const group of groupByFile(violations)) {
+    out.push(...formatFileGroup(group, pathPrefix));
+    out.push("");
+  }
+  return out;
+}
+function buildMarkdown(run2, ctx = {}) {
+  const lines = [];
+  const isMulti = run2.urls.length > 1;
+  const pathPrefix = ctx.pathPrefix ?? "";
+  if (run2.regressionMode) {
+    lines.push(`# AccessLint regression audit`);
+    lines.push("");
     lines.push(
-      `**${filteredViolations} violation${filteredViolations === 1 ? "" : "s"}**: ${summary2}${noteSuffix}.`
+      `Comparing **${run2.urls[0]?.url}** against baseline **${run2.baseline}**. Only violations *new* in the candidate are reported below.`
     );
     lines.push("");
-    for (const group of groupByFile(violations)) {
-      lines.push(...formatFileGroup(group, ctx.pathPrefix ?? ""));
+  } else if (isMulti) {
+    lines.push(`# AccessLint audit \u2014 ${run2.urls.length} URLs`);
+    lines.push("");
+    const summary2 = ALL_IMPACTS.flatMap(
+      (i) => run2.counts[i] > 0 ? [`${IMPACT_EMOJI[i]} ${run2.counts[i]} ${i}`] : []
+    ).join(", ");
+    lines.push(
+      run2.filteredViolations === 0 ? "**No accessibility violations found across any URL.** \u2705" : `**${run2.filteredViolations} violations across ${run2.urls.length} URLs**: ${summary2 || "\u2014"}.`
+    );
+    lines.push("");
+  } else {
+    lines.push(`# AccessLint audit \u2014 ${run2.urls[0]?.url}`);
+    lines.push("");
+  }
+  for (const per of run2.urls) {
+    if (isMulti) {
+      lines.push(`## ${per.url}`);
       lines.push("");
     }
+    lines.push(...formatPerUrl(per, pathPrefix));
   }
   lines.push(
-    `<sub>Generated ${generatedAt}` + (ctx.runUrl ? ` \xB7 [run log](${ctx.runUrl})` : "") + ` \xB7 [\`AccessLint/audit\`](https://github.com/AccessLint/audit)</sub>`
+    `<sub>Generated ${run2.generatedAt}` + (ctx.runUrl ? ` \xB7 [run log](${ctx.runUrl})` : "") + ` \xB7 [\`AccessLint/audit\`](https://github.com/AccessLint/audit)</sub>`
   );
   return lines.join("\n") + "\n";
+}
+
+// src/diff.ts
+function newViolations(baseline, candidate) {
+  const baselineKeys = new Set(baseline.map((v) => `${v.ruleId}\0${v.selector}`));
+  return candidate.filter((v) => !baselineKeys.has(`${v.ruleId}\0${v.selector}`));
+}
+
+// src/orchestrator.ts
+async function runAll(inputs) {
+  if (inputs.compareAgainst) {
+    return runRegression(inputs);
+  }
+  return runMulti(inputs);
+}
+async function runMulti(inputs) {
+  const reports = [];
+  for (const url of inputs.urls) {
+    info(`Auditing ${url}`);
+    const raw = await runAudit(inputs, url);
+    reports.push(buildPerUrlReport(raw, url, inputs.minImpact));
+  }
+  return aggregateRun(reports);
+}
+async function runRegression(inputs) {
+  const candidate = inputs.urls[0];
+  const baseline = inputs.compareAgainst;
+  info(`Auditing baseline ${baseline}`);
+  const baselineRaw = await runAudit(inputs, baseline);
+  const baselineReport = buildPerUrlReport(baselineRaw, baseline, inputs.minImpact);
+  info(`Auditing candidate ${candidate}`);
+  const candidateRaw = await runAudit(inputs, candidate);
+  const candidateReport = buildPerUrlReport(candidateRaw, candidate, inputs.minImpact);
+  const newOnes = newViolations(baselineReport.violations, candidateReport.violations);
+  const onlyNew = withFilteredViolations(candidateReport, newOnes);
+  return aggregateRun([onlyNew], { regressionMode: true, baseline });
 }
 
 // src/annotations.ts
@@ -19459,6 +19581,83 @@ function emitAnnotations(violations, workspace) {
   return count;
 }
 
+// src/sarif.ts
+function impactToSarifLevel(impact) {
+  switch (impact) {
+    case "critical":
+    case "serious":
+      return "error";
+    case "moderate":
+      return "warning";
+    case "minor":
+      return "note";
+  }
+}
+function ruleHelpUri(ruleId) {
+  return `https://github.com/AccessLint/accesslint/tree/main/core/src/rules/${ruleId}`;
+}
+function locationFor(v, workspace) {
+  const src = v.source?.[0];
+  if (src) {
+    const rel = toWorkspaceRelative(src.file, workspace);
+    if (rel) {
+      const physical = {
+        artifactLocation: { uri: rel, uriBaseId: "%SRCROOT%" },
+        region: { startLine: src.line, startColumn: src.column }
+      };
+      if (physical.region && physical.region.startColumn === void 0) {
+        delete physical.region.startColumn;
+      }
+      return { physicalLocation: physical };
+    }
+  }
+  return {
+    logicalLocations: [{ name: v.url, kind: "url" }]
+  };
+}
+function buildSarif(run2, workspace) {
+  const seen = /* @__PURE__ */ new Map();
+  for (const v of run2.violations) {
+    if (seen.has(v.ruleId)) continue;
+    seen.set(v.ruleId, {
+      id: v.ruleId,
+      shortDescription: { text: v.message },
+      helpUri: ruleHelpUri(v.ruleId),
+      properties: { tags: ["accessibility", "wcag"] }
+    });
+  }
+  const results = run2.violations.map((v) => ({
+    ruleId: v.ruleId,
+    level: impactToSarifLevel(v.impact),
+    message: { text: v.message },
+    locations: [locationFor(v, workspace)],
+    properties: {
+      impact: v.impact,
+      selector: v.selector,
+      url: v.url
+    }
+  }));
+  return {
+    $schema: "https://json.schemastore.org/sarif-2.1.0-rtm.5.json",
+    version: "2.1.0",
+    runs: [
+      {
+        tool: {
+          driver: {
+            name: "AccessLint",
+            informationUri: "https://github.com/AccessLint/audit",
+            rules: Array.from(seen.values())
+          }
+        },
+        originalUriBaseIds: {
+          "%SRCROOT%": { uri: "file://" + (workspace.endsWith("/") ? workspace : workspace + "/") }
+        },
+        results
+      }
+    ]
+  };
+}
+
 // src/main.ts
 function assertNodeVersion() {
   const major = Number(process.versions.node.split(".")[0]);
@@ -19471,27 +19670,32 @@ function assertNodeVersion() {
 async function run() {
   assertNodeVersion();
   const inputs = readInputs();
+  const targetSummary = inputs.urls.length === 1 ? inputs.urls[0] : `${inputs.urls.length} URLs`;
+  const modeSummary = inputs.compareAgainst ? ` (regression vs ${inputs.compareAgainst})` : "";
   info(
-    `Auditing ${inputs.url} (WCAG ${inputs.wcagLevel}, min impact ${inputs.minImpact}, fail-on ${inputs.failOn})`
+    `Auditing ${targetSummary}${modeSummary} \u2014 WCAG ${inputs.wcagLevel}, min impact ${inputs.minImpact}, fail-on ${inputs.failOn}`
   );
-  const raw = await runAudit(inputs);
-  const report = buildReport(raw, inputs);
+  const auditRun = await runAll(inputs);
   const workspace = process.env.GITHUB_WORKSPACE ?? process.cwd();
   const jsonPath = join(workspace, "accesslint-report.json");
   const mdPath = join(workspace, "accesslint-report.md");
+  const sarifPath = join(workspace, "accesslint-report.sarif");
   const pathPrefix = workspaceFilePrefix(workspace);
   const runUrl = buildRunUrl();
-  const markdown = buildMarkdown(report, { pathPrefix, runUrl });
-  writeFileSync(jsonPath, JSON.stringify(report, null, 2) + "\n", "utf8");
+  const markdown = buildMarkdown(auditRun, { pathPrefix, runUrl });
+  const sarif = buildSarif(auditRun, workspace);
+  writeFileSync(jsonPath, JSON.stringify(auditRun, null, 2) + "\n", "utf8");
   writeFileSync(mdPath, markdown, "utf8");
-  const annotated = emitAnnotations(report.violations, workspace);
-  setOutput("violation-count", report.filteredViolations);
-  setOutput("critical-count", report.counts.critical);
-  setOutput("serious-count", report.counts.serious);
+  writeFileSync(sarifPath, JSON.stringify(sarif, null, 2) + "\n", "utf8");
+  const annotated = emitAnnotations(auditRun.violations, workspace);
+  setOutput("violation-count", auditRun.filteredViolations);
+  setOutput("critical-count", auditRun.counts.critical);
+  setOutput("serious-count", auditRun.counts.serious);
   setOutput("annotated-count", annotated);
-  setOutput("failed", report.filteredViolations > 0 ? "true" : "false");
+  setOutput("failed", auditRun.filteredViolations > 0 ? "true" : "false");
   setOutput("report-json-path", jsonPath);
   setOutput("report-markdown-path", mdPath);
+  setOutput("report-sarif-path", sarifPath);
   if (process.env.GITHUB_STEP_SUMMARY) {
     try {
       await summary.addRaw(markdown).write();
@@ -19499,11 +19703,11 @@ async function run() {
     }
   }
   info(
-    `Audit complete: ${report.filteredViolations}/${report.totalViolations} violations after filter (${report.counts.critical} critical, ${report.counts.serious} serious). ${annotated} inline annotation${annotated === 1 ? "" : "s"} emitted.`
+    `Audit complete: ${auditRun.filteredViolations}/${auditRun.totalViolations} violations after filter (${auditRun.counts.critical} critical, ${auditRun.counts.serious} serious). ${annotated} inline annotation${annotated === 1 ? "" : "s"} emitted.`
   );
-  if (shouldFail(report, inputs.failOn)) {
+  if (shouldFail(auditRun, inputs.failOn)) {
     setFailed(
-      `accessibility threshold failed (fail-on=${inputs.failOn}, violations=${report.filteredViolations})`
+      `accessibility threshold failed (fail-on=${inputs.failOn}, violations=${auditRun.filteredViolations})`
     );
   }
 }
