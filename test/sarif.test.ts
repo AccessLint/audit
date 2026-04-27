@@ -73,7 +73,7 @@ describe("buildSarif", () => {
     });
   });
 
-  it("falls back to a logical location when source is outside workspace", () => {
+  it("synthesizes a physicalLocation pointing at the URL when source is outside workspace", () => {
     const sarif = buildSarif(
       runFor([
         v({
@@ -83,8 +83,19 @@ describe("buildSarif", () => {
       WORKSPACE,
     );
     const loc = sarif.runs[0]!.results[0]!.locations[0]!;
-    expect(loc.physicalLocation).toBeUndefined();
+    // GitHub Code Scanning requires a physical location on every result.
+    expect(loc.physicalLocation).toEqual({
+      artifactLocation: { uri: "https://example.com" },
+      region: { startLine: 1 },
+    });
     expect(loc.logicalLocations?.[0]?.name).toBe("https://example.com");
+  });
+
+  it("synthesizes a physicalLocation when there's no source at all", () => {
+    const sarif = buildSarif(runFor([v()]), WORKSPACE);
+    const loc = sarif.runs[0]!.results[0]!.locations[0]!;
+    expect(loc.physicalLocation).toBeDefined();
+    expect(loc.physicalLocation?.artifactLocation.uri).toBe("https://example.com");
   });
 
   it("deduplicates rules across multiple violations", () => {

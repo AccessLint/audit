@@ -1,6 +1,6 @@
 {
   "name": "@accesslint/audit-action",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "GitHub Action that audits a URL against WCAG 2.2 and emits JSON + Markdown reports.",
   "type": "module",

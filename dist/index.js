@@ -19612,6 +19612,10 @@ function locationFor(v, workspace) {
     }
   }
   return {
+    physicalLocation: {
+      artifactLocation: { uri: v.url },
+      region: { startLine: 1 }
+    },
     logicalLocations: [{ name: v.url, kind: "url" }]
   };
 }

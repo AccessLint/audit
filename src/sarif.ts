@@ -94,9 +94,16 @@ function locationFor(v: LocatedViolation, workspace: string): SarifLocation {
       return { physicalLocation: physical };
     }
   }
-  // Fallback: logical location naming the URL where it was found. Keeps the
-  // SARIF spec valid (every result needs at least one location).
+  // Fallback: synthesize a physicalLocation pointing at the page URL.
+  // SARIF allows http(s) URIs in artifactLocation, and GitHub Code Scanning
+  // *requires* every result to carry a physicalLocation (logicalLocations
+  // alone are rejected). We add a logicalLocation alongside so the URL is
+  // also surfaced semantically.
   return {
+    physicalLocation: {
+      artifactLocation: { uri: v.url },
+      region: { startLine: 1 },
+    },
     logicalLocations: [{ name: v.url, kind: "url" }],
   };
 }
